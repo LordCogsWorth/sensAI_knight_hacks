@@ -14,10 +14,13 @@ export default function LoggedIn() {
   const [facingMode, setFacingMode] = useState('user');
   const [voices, setVoices] = useState([]);
   const [selectedVoice, setSelectedVoice] = useState(null);
-  const [objects, setObjects] = useState([]); // State for detected objects
-  const [previousObjects, setPreviousObjects] = useState([]); // State for previous frame's objects
+  const [objects, setObjects] = useState([]);
   const [videoSize, setVideoSize] = useState({ width: 640, height: 480 });
-  const [alertsEnabled, setAlertsEnabled] = useState(true); // New state for toggling alerts
+  const [mode, setMode] = useState('guide');
+  const [notification, setNotification] = useState('');
+  const recognitionRef = useRef(null);
+  const previousObjectsRef = useRef([]);
+  const lastGuidanceTimeRef = useRef(0);
 
   // Fetch available voices for text-to-speech
   useEffect(() => {
@@ -25,7 +28,7 @@ export default function LoggedIn() {
       const voicesList = window.speechSynthesis.getVoices();
       setVoices(voicesList);
       if (voicesList.length > 0) {
-        setSelectedVoice(voicesList[0]); // Set a default voice
+        setSelectedVoice(voicesList[0]);
       }
     };
 
@@ -33,10 +36,69 @@ export default function LoggedIn() {
     window.speechSynthesis.onvoiceschanged = fetchVoices;
   }, []);
 
+  // Initialize Speech Recognition
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognitionRef.current = recognition;
+
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        setNotification('Microphone is active and listening...');
+      };
+
+      recognition.onresult = (event) => {
+        const transcript = event.results[event.resultIndex][0].transcript.toLowerCase();
+        handleVoiceCommand(transcript);
+      };
+
+      recognition.onerror = (event) => {
+        setNotification(`Error: ${event.error}`);
+      };
+
+      recognition.onend = () => {
+        setNotification('Microphone stopped. Restarting...');
+        recognition.start();
+      };
+
+      recognition.start();
+    } else {
+      console.error("Speech Recognition is not supported in this browser.");
+    }
+  }, []);
+
+  // Handle voice commands
+  const handleVoiceCommand = (command) => {
+    if (command.includes('ok sensei')) {
+      if (command.includes('switch to capture')) {
+        setMode('capture');
+        setNotification('Switched to Capture Mode');
+        captureAndReadText(); // Capture the text immediately
+      } else if (command.includes('flip the camera')) {
+        toggleFacingMode();
+        speakText('Camera flipped.');
+      } else if (command.includes('switch to guide')) {
+        setMode('guide');
+        setNotification('Switched to Guide Mode');
+        speakText('Guiding mode activated.');
+      } else {
+        setNotification('Command not recognized.');
+      }
+
+      setTimeout(() => setNotification(''), 3000);
+    }
+  };
+
   // Load the CocoSSD model for object detection
   useEffect(() => {
     const loadModel = async () => {
+      setLoading(true);
       const model = await cocoSsd.load();
+      setLoading(false);
       detectObjects(model);
     };
     loadModel();
@@ -50,21 +112,32 @@ export default function LoggedIn() {
 
   // Function to detect objects using the loaded model
   const detectObjects = async (model) => {
-    // Reduce detection frequency for better performance
     setInterval(async () => {
       if (webcamRef.current && webcamRef.current.video.readyState === 4) {
         const video = webcamRef.current.video;
         const predictions = await model.detect(video);
-        compareObjects(predictions); // Directly run the proximity check without delay
+
+        if (mode === 'guide') {
+          compareObjects(predictions);
+        }
+
         setObjects(predictions);
-        setPreviousObjects(predictions);
+        previousObjectsRef.current = predictions;
       }
-    }, 500); // Detect objects every half second
+    }, 250);
   };
 
   // Compare current objects with previous frame's objects to check for proximity and direction
   const compareObjects = (currentObjects) => {
-    const videoCenter = videoSize.width / 2; // Get the center of the video frame
+    if (mode !== 'guide') return;
+
+    const previousObjects = previousObjectsRef.current;
+    const videoCenter = videoSize.width / 2;
+    const currentTime = new Date().getTime();
+
+    if (currentTime - lastGuidanceTimeRef.current < 3000) {
+      return;
+    }
 
     currentObjects.forEach((currentObject) => {
       const previousObject = previousObjects.find(
@@ -72,43 +145,31 @@ export default function LoggedIn() {
       );
 
       if (previousObject) {
-        // Calculate current and previous bounding box areas
         const currentSize = currentObject.bbox[2] * currentObject.bbox[3];
         const previousSize = previousObject.bbox[2] * previousObject.bbox[3];
+        const sizeThreshold = 0.15;
 
-        if (currentSize > previousSize) {
-          // Speak out the message that the object is getting closer
-          if (alertsEnabled) { // Check if alerts are enabled before speaking
-            speakText(`The ${currentObject.class} is approaching!`);
+        if ((currentSize - previousSize) / previousSize > sizeThreshold) {
+          const objectCenter = currentObject.bbox[0] + currentObject.bbox[2] / 2;
+          console.log(`Object: ${currentObject.class}, Center: ${objectCenter}, Video Center: ${videoCenter}`);
 
-            // Calculate the center position of the bounding box
-            const objectCenter = currentObject.bbox[0] + currentObject.bbox[2] / 2;
-
-            // Compare the object's center position to the center of the video
-            if (objectCenter < videoCenter) {
-              speakText('please move to the right!'); // Object is on the left side
-            } else {
-              speakText('Please move to the left!'); // Object is on the right side
-            }
+          if (objectCenter > videoCenter) {
+            console.log('Advising to move right');
+            debounceSpeak('Move to the right!');
+          } else if (objectCenter < videoCenter) {
+            console.log('Advising to move left');
+            debounceSpeak('Move to the left!');
+          } else {
+            console.log('Object is centered, no movement needed');
           }
+
+          lastGuidanceTimeRef.current = currentTime;
         }
       }
     });
   };
 
-  // Updated speakText function using the Web Speech API
-  const speakText = (text) => {
-    if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'en-US'; // You can customize this to different languages if needed
-      utterance.voice = selectedVoice; // Use the selected voice
-      window.speechSynthesis.speak(utterance); // Speak the utterance
-    } else {
-      console.error('Text-to-speech is not supported in this browser.');
-    }
-  };
-
-  // Function to capture the image, run OCR, and speak the text
+  // Function to capture the image, run OCR, and filter the text using LLM
   const captureAndReadText = () => {
     const imageSrc = webcamRef.current.getScreenshot();
     if (imageSrc) {
@@ -123,9 +184,7 @@ export default function LoggedIn() {
         }
       )
         .then(({ data: { text } }) => {
-          setCapturedText(text);
-          setLoading(false);
-          speakText(text);
+          filterTextWithLLM(text); // Pass the recognized text to LLM for filtering
         })
         .catch((err) => {
           setError('Failed to read text from the image');
@@ -133,6 +192,79 @@ export default function LoggedIn() {
         });
     } else {
       setError('Failed to capture image from the webcam');
+    }
+  };
+
+  // Function to filter text using the LLM
+  const filterTextWithLLM = async (text) => {
+    setLoading(true);
+    try {
+      const response = await fetch(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer YOUR_API_KEY_HERE`, // Use your API key here
+          },
+          body: JSON.stringify({
+            model: "gpt-3.5-turbo", // or use the model you want
+            messages: [
+              {
+                role: "user",
+                content: `Can you filter this text to remove all the nonsense? Also, if the text is in a different language, convert it to English: ${text}`,
+              },
+            ],
+          }),
+        }
+      );
+
+      console.log("Response status:", response.status);
+      const responseText = await response.json();
+      console.log("Response data:", responseText);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status} - ${responseText}`);
+      }
+
+      const filteredText = responseText.choices[0].message.content;
+
+      if (!filteredText || filteredText.trim() === "") {
+        setCapturedText("No meaningful text found.");
+        speakText("No meaningful text found.");
+      } else {
+        setCapturedText(filteredText);
+        speakText(filteredText);
+      }
+    } catch (error) {
+      console.error("Failed to filter text with LLM:", error);
+      setError("Failed to filter text with LLM");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Updated speakText function using the Web Speech API with debounce
+  let lastSpokenTime = 0;
+  const debounceSpeak = (text, delay = 1000) => {
+    const currentTime = new Date().getTime();
+    if (currentTime - lastSpokenTime > delay) {
+      speakText(text);
+      lastSpokenTime = currentTime;
+    }
+  };
+
+  const speakText = (text) => {
+    if (mode !== 'guide') return;
+
+    if ('speechSynthesis' in window) {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'en-US';
+      utterance.voice = selectedVoice;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
+    } else {
+      console.error('Text-to-speech is not supported in this browser.');
     }
   };
 
@@ -158,13 +290,24 @@ export default function LoggedIn() {
     };
   };
 
-  // Toggle the alerts on and off
-  const toggleAlerts = () => {
-    setAlertsEnabled(!alertsEnabled);
-  };
-
   return (
     <>
+      {/* Notification Box */}
+      {notification && (
+        <div style={{
+          position: 'fixed',
+          top: '20px',
+          right: '20px',
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          color: 'white',
+          padding: '10px',
+          borderRadius: '5px',
+          zIndex: 1000,
+        }}>
+          {notification}
+        </div>
+      )}
+
       {/* Header with Avatar and Logout */}
       <header>
         <nav className="nav container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -188,8 +331,7 @@ export default function LoggedIn() {
                 alignItems: 'center',
                 marginRight: 10,
               }}>
-                {user?.given_name?.[0]}
-                {user?.family_name?.[1]}
+                {user?.given_name?.[0]}{user?.family_name?.[1]}
               </div>
             )}
             <div>
@@ -222,10 +364,10 @@ export default function LoggedIn() {
                 audio={false}
                 ref={webcamRef}
                 screenshotFormat="image/jpeg"
-                videoConstraints={{ 
-                  facingMode: 'user', 
-                  width: { ideal: 320 }, // Reduced width for faster processing
-                  height: { ideal: 240 } // Reduced height for faster processing
+                videoConstraints={{
+                  facingMode: facingMode,
+                  width: { ideal: 320 },
+                  height: { ideal: 240 }
                 }}
                 style={{
                   width: '100%',
@@ -262,124 +404,11 @@ export default function LoggedIn() {
                 );
               })}
             </div>
-
-            <button
-              onClick={captureAndReadText}
-              style={{
-                backgroundColor: '#cc0000',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '50px',
-                padding: '15px 30px',
-                margin: '20px 10px',
-                cursor: 'pointer',
-                fontSize: '18px',
-              }}
-            >
-              Capture and Read Text
-            </button>
-
-            <button
-              onClick={toggleFacingMode}
-              style={{
-                backgroundColor: '#cc0000',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '50px',
-                padding: '15px 30px',
-                margin: '20px 10px',
-                cursor: 'pointer',
-                fontSize: '18px',
-              }}
-            >
-              Flip Camera
-            </button>
-
-            {/* Toggle Alerts Button */}
-            <button
-              onClick={toggleAlerts}
-              style={{
-                backgroundColor: alertsEnabled ? '#4CAF50' : '#f44336', // Green if enabled, red if disabled
-                color: '#fff',
-                border: 'none',
-                borderRadius: '50px',
-                padding: '15px 30px',
-                margin: '20px 10px',
-                cursor: 'pointer',
-                fontSize: '18px',
-              }}
-            >
-              {alertsEnabled ? 'Alerts On' : 'Alerts Off'}
-            </button>
-
-            {/* Voice Selection Dropdown */}
-            <select
-              onChange={(e) =>
-                setSelectedVoice(voices.find((voice) => voice.name === e.target.value))
-              }
-              style={{
-                backgroundColor: '#cc0000',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '50px',
-                padding: '15px 30px',
-                margin: '20px 10px',
-                cursor: 'pointer',
-                fontSize: '18px',
-              }}
-            >
-              {voices.map((voice) => (
-                <option key={voice.name} value={voice.name}>
-                  {voice.name} ({voice.lang})
-                </option>
-              ))}
-            </select>
-
-            {/* Loading Spinner */}
-            {loading && (
-              <p>Processing image for text...</p>
-            )}
-
-            {/* Display error if there's an issue */}
-            {error && (
-              <p style={{ color: 'red' }}>{error}</p>
-            )}
-
-            {/* Display captured text */}
-            {capturedText && (
-              <div style={{
-                marginTop: 20,
-                padding: 5,
-                backgroundColor: '#000',
-                color: '#fff',
-                borderRadius: 5,
-                width: '80%',
-                fontSize: '0.9rem'
-              }}>
-                <p>{capturedText}</p>
-              </div>
-            )}
           </div>
 
           <section className="next-steps-section"></section>
         </div>
       </main>
-
-      {/* Footer */}
-      <footer className="footer" style={{ backgroundColor: '#000000', padding: '20px', textAlign: 'center' }}>
-        <div className="container">
-          <strong className="text-heading-2" style={{ color: '#ffffff' }}>KindeAuth</strong>
-          <p className="footer-tagline text-body-3" style={{ color: '#ffffff' }}>
-            Visit our{" "}
-            <a className="link" href="https://kinde.com/docs" style={{ color: '#80b3ff' }}>
-              help center
-            </a>
-          </p>
-          <small className="text-subtle" style={{ color: '#e6e6e6' }}>
-            © 2023 KindeAuth, Inc. All rights reserved
-          </small>
-        </div>
-      </footer>
     </>
   );
 }
