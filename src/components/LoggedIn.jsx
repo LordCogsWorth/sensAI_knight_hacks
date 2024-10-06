@@ -4,6 +4,7 @@ import { useKindeAuth } from '@kinde-oss/kinde-auth-react';
 import Tesseract from 'tesseract.js';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import '@tensorflow/tfjs';
+import { debounce } from 'lodash';
 
 export default function LoggedIn() {
   const { user, logout } = useKindeAuth();
@@ -21,6 +22,7 @@ export default function LoggedIn() {
   const recognitionRef = useRef(null);
   const previousObjectsRef = useRef([]);
   const lastGuidanceTimeRef = useRef(0);
+  let c = 0;
 
   // Fetch available voices for text-to-speech
   useEffect(() => {
@@ -69,29 +71,43 @@ export default function LoggedIn() {
     } else {
       console.error("Speech Recognition is not supported in this browser.");
     }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
   }, []);
 
-  // Handle voice commands
+  // Handle voice commands with debounce
   const handleVoiceCommand = (command) => {
-    if (command.includes('ok sensei')) {
-      if (command.includes('switch to capture')) {
+    const trimmedCommand = command.trim().toLowerCase(); // Trim and convert to lowercase for robustness
+    console.log("Recognized command: ", trimmedCommand); // Debugging
+  
+    if (trimmedCommand.includes('ok sensei')) {
+      if (trimmedCommand.includes('switch to capture')) {
+        c = 0;
         setMode('capture');
         setNotification('Switched to Capture Mode');
         captureAndReadText(); // Capture the text immediately
-      } else if (command.includes('flip the camera')) {
+        speakText('Capture mode activated.', false);  // Speak the message in capture mode
+      } else if (trimmedCommand.includes('flip the camera')) {
+        c = 0;
         toggleFacingMode();
-        speakText('Camera flipped.');
-      } else if (command.includes('switch to guide')) {
+        speakText('Camera flipped.', false);  // Speak the message regardless of mode
+      } else if (trimmedCommand.includes('switch to guide')) {
+        c = 1;
         setMode('guide');
         setNotification('Switched to Guide Mode');
         speakText('Guiding mode activated.');
       } else {
         setNotification('Command not recognized.');
       }
-
-      setTimeout(() => setNotification(''), 3000);
+      // Clear notification after a short delay
+      setTimeout(() => setNotification(''), 1000);
     }
   };
+  
 
   // Load the CocoSSD model for object detection
   useEffect(() => {
@@ -110,72 +126,76 @@ export default function LoggedIn() {
     setVideoSize({ width: video.videoWidth, height: video.videoHeight });
   };
 
-  // Function to detect objects using the loaded model
+  // Function to detect objects using the loaded model with requestAnimationFrame
   const detectObjects = async (model) => {
-    setInterval(async () => {
-      if (webcamRef.current && webcamRef.current.video.readyState === 4) {
-        const video = webcamRef.current.video;
-        const predictions = await model.detect(video);
+    if (webcamRef.current && webcamRef.current.video.readyState === 4) {
+      const video = webcamRef.current.video;
+      const predictions = await model.detect(video);
 
-        if (mode === 'guide') {
-          compareObjects(predictions);
+      if (predictions.length > 0) {
+        if (JSON.stringify(predictions) !== JSON.stringify(previousObjectsRef.current)) {
+          if (mode === 'guide') {
+            compareObjects(predictions);
+          }
+          setObjects(predictions);
+          previousObjectsRef.current = predictions;
         }
-
-        setObjects(predictions);
-        previousObjectsRef.current = predictions;
       }
-    }, 250);
+    }
+    requestAnimationFrame(() => detectObjects(model));
   };
 
   // Compare current objects with previous frame's objects to check for proximity and direction
   const compareObjects = (currentObjects) => {
     if (mode !== 'guide') return;
 
-    const previousObjects = previousObjectsRef.current;
     const videoCenter = videoSize.width / 2;
     const currentTime = new Date().getTime();
 
-    if (currentTime - lastGuidanceTimeRef.current < 3000) {
+    if (currentTime - lastGuidanceTimeRef.current < 6000) {
       return;
     }
 
     currentObjects.forEach((currentObject) => {
-      const previousObject = previousObjects.find(
-        (prev) => prev.class === currentObject.class
-      );
+      const objectCenter = currentObject.bbox[0] + currentObject.bbox[2] / 2;
+      
+      const previousObject = previousObjectsRef.current.find(prev => prev.class === currentObject.class);
+      const currentSize = currentObject.bbox[2] * currentObject.bbox[3];
+      console.log(`Object: ${currentObject.class}, Center: ${objectCenter}, Video Center: ${videoCenter}`);
 
       if (previousObject) {
-        const currentSize = currentObject.bbox[2] * currentObject.bbox[3];
         const previousSize = previousObject.bbox[2] * previousObject.bbox[3];
-        const sizeThreshold = 0.15;
-
-        if ((currentSize - previousSize) / previousSize > sizeThreshold) {
-          const objectCenter = currentObject.bbox[0] + currentObject.bbox[2] / 2;
-          console.log(`Object: ${currentObject.class}, Center: ${objectCenter}, Video Center: ${videoCenter}`);
-
-          if (objectCenter > videoCenter) {
-            console.log('Advising to move right');
-            debounceSpeak('Move to the right!');
-          } else if (objectCenter < videoCenter) {
-            console.log('Advising to move left');
-            debounceSpeak('Move to the left!');
-          } else {
-            console.log('Object is centered, no movement needed');
-          }
-
-          lastGuidanceTimeRef.current = currentTime;
+        console.log("PREVIOUS    " + previousSize);
+        console.log("CURRENT    " + currentSize);
+        if (currentSize > previousSize * 1.01) {
+          console.log('Object is approaching');
+          debounceSpeak(`${currentObject.class} is approaching!`);
         }
       }
+      if(c == 1){
+        if (objectCenter > videoCenter/2) { // Adding margin to prevent constant instructions
+          console.log(objectCenter);
+          //console.log('Advising to move left');
+          debounceSpeak('Move to the left!');
+        } else if (objectCenter < videoCenter/2) { // Adding margin to prevent constant instructions
+          //console.log('Advising to move right');
+          debounceSpeak('Move to the right!');
+        } else {
+          console.log('Object is centered, no movement needed');
+        }
+      }
+      lastGuidanceTimeRef.current = currentTime;
+    
     });
   };
 
   // Function to capture the image, run OCR, and filter the text using LLM
   const captureAndReadText = () => {
-    const imageSrc = webcamRef.current.getScreenshot();
+    const imageSrc = webcamRef.current.getScreenshot({ width: 320, height: 240 });
     if (imageSrc) {
       setLoading(true);
       setError(null);
-
+  
       Tesseract.recognize(
         imageSrc,
         'eng',
@@ -184,16 +204,25 @@ export default function LoggedIn() {
         }
       )
         .then(({ data: { text } }) => {
-          filterTextWithLLM(text); // Pass the recognized text to LLM for filtering
+          setCapturedText(text);
+          setLoading(false);
+          if (text.trim()) {
+            speakText(text, false);  // Speak the recognized text regardless of mode
+          } else {
+            speakText('No meaningful text found.', false);  // Inform if no text is found
+          }
         })
         .catch((err) => {
           setError('Failed to read text from the image');
           setLoading(false);
+          speakText('Error reading the text.', false);  // Speak error message regardless of mode
         });
     } else {
       setError('Failed to capture image from the webcam');
+      speakText('Failed to capture image.', false);  // Speak error message regardless of mode
     }
   };
+  
 
   // Function to filter text using the LLM
   const filterTextWithLLM = async (text) => {
@@ -254,9 +283,9 @@ export default function LoggedIn() {
     }
   };
 
-  const speakText = (text) => {
-    if (mode !== 'guide') return;
-
+  const speakText = (text, onlyInGuideMode = true) => {
+    if (onlyInGuideMode && mode !== 'guide') return;  // If only allowed in guide mode, return
+  
     if ('speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'en-US';
@@ -267,6 +296,7 @@ export default function LoggedIn() {
       console.error('Text-to-speech is not supported in this browser.');
     }
   };
+  
 
   // Function to toggle the camera between front and back
   const toggleFacingMode = () => {
@@ -412,3 +442,4 @@ export default function LoggedIn() {
     </>
   );
 }
+
