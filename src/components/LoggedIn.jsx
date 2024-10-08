@@ -1,3 +1,6 @@
+// THIRD PLACE !!!!!!!!
+
+
 import React, { useRef, useState, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import { useKindeAuth } from '@kinde-oss/kinde-auth-react';
@@ -229,15 +232,14 @@ export default function LoggedIn() {
     setLoading(true);
     try {
       const response = await fetch(
-        "https://api.openai.com/v1/chat/completions",
+        "https://knighthacks24.service-now.com/api/now/table//api/x_snc_kh24/executenowllm/kh24",
         {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer YOUR_API_KEY_HERE`, // Use your API key here
+            "Content-Type": "application/json",// Use your API key here
           },
           body: JSON.stringify({
-            model: "gpt-3.5-turbo", // or use the model you want
+            // or use the model you want
             messages: [
               {
                 role: "user",
